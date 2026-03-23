@@ -15,108 +15,142 @@ from .models import move_batch_to_device, unwrap_model
 from .tasks import PRIMARY_METRICS
 
 
-def _accumulate_unclipped_batch_gradients(optimizer, gradient_buffer: list[torch.Tensor | None]):
-    for index, parameter in enumerate(optimizer.params):
-        grad_sample = optimizer._get_flat_grad_sample(parameter)
-        batch_gradient = grad_sample.detach().sum(dim=0)
+def _compute_per_sample_norms_from_grad_samples(optimizer) -> torch.Tensor | None:
+    """
+    Compute global per-sample gradient L2 norms across all parameters.
 
-        if gradient_buffer[index] is None:
-            gradient_buffer[index] = batch_gradient.clone()
-        else:
-            gradient_buffer[index] += batch_gradient
+    Returns:
+        Tensor of shape [batch_size, 1], or None if no grad_sample exists.
+    """
+    per_sample_sq_norms = None
 
-    return gradient_buffer
-
-
-def _collect_clipped_batch_gradients(optimizer):
-    clipped_gradients = []
     for parameter in optimizer.params:
-        clipped_gradients.append(
-            parameter.summed_grad.detach().clone() if parameter.summed_grad is not None else None
-        )
-    return clipped_gradients
-
-
-def _sample_tensor_values(tensors: list[torch.Tensor | None], max_values: int) -> torch.Tensor:
-    flat_tensors = [tensor.reshape(-1).float().cpu() for tensor in tensors if tensor is not None]
-    if not flat_tensors:
-        return torch.empty(0)
-
-    total_values = sum(tensor.numel() for tensor in flat_tensors)
-    if total_values <= max_values:
-        return torch.cat(flat_tensors)
-
-    sampled_tensors = []
-    for tensor in flat_tensors:
-        sample_size = max(1, int(round(max_values * tensor.numel() / total_values)))
-        sample_size = min(sample_size, tensor.numel())
-        sample_indices = torch.linspace(0, tensor.numel() - 1, steps=sample_size).long()
-        sampled_tensors.append(tensor[sample_indices])
-
-    return torch.cat(sampled_tensors)[:max_values]
-
-
-def _summarize_gradients(tensors: list[torch.Tensor | None], histogram_max_values: int):
-    total_sum = 0.0
-    total_sq_sum = 0.0
-    total_numel = 0
-    max_abs = 0.0
-
-    for tensor in tensors:
-        if tensor is None:
+        grad_sample = optimizer._get_flat_grad_sample(parameter)
+        if grad_sample is None:
             continue
 
-        current = tensor.detach().float()
-        total_sum += current.sum().item()
-        total_sq_sum += current.pow(2).sum().item()
-        total_numel += current.numel()
-        max_abs = max(max_abs, current.abs().max().item())
+        grad_sample = grad_sample.detach()
 
-    if total_numel == 0:
-        return {
-            "norm": 0.0,
-            "mean": 0.0,
-            "std": 0.0,
-            "max_abs": 0.0,
-            "histogram_values": torch.empty(0),
-        }
+        # [batch_size]
+        param_sq_norms = grad_sample.reshape(grad_sample.shape[0], -1).pow(2).sum(dim=1)
 
-    mean = total_sum / total_numel
-    variance = max((total_sq_sum / total_numel) - (mean**2), 0.0)
+        if per_sample_sq_norms is None:
+            per_sample_sq_norms = param_sq_norms
+        else:
+            per_sample_sq_norms = per_sample_sq_norms + param_sq_norms
 
-    return {
-        "norm": total_sq_sum**0.5,
-        "mean": mean,
-        "std": variance**0.5,
-        "max_abs": max_abs,
-        "histogram_values": _sample_tensor_values(tensors, histogram_max_values),
-    }
+    if per_sample_sq_norms is None:
+        return None
+
+    return per_sample_sq_norms.sqrt().unsqueeze(1)  # [batch_size, 1]
 
 
-def _log_gradient_summaries(wandb_module, unclipped_gradients, clipped_gradients, logical_step, epoch, config: TrainConfig):
+def _accumulate_logical_batch_per_sample_sq_norms(
+    optimizer,
+    accumulated_sq_norms: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """
+    Accumulate per-sample squared norms across physical batches into one logical batch vector.
+
+    With BatchMemoryManager, each loop iteration may be only a physical batch.
+    We concatenate per-sample squared norms so that one logical step logs all samples
+    belonging to that logical batch.
+
+    Returns:
+        Tensor of shape [num_samples_so_far] or None
+    """
+    current_sq_norms = None
+
+    for parameter in optimizer.params:
+        grad_sample = optimizer._get_flat_grad_sample(parameter)
+        if grad_sample is None:
+            continue
+
+        grad_sample = grad_sample.detach()
+        param_sq_norms = grad_sample.reshape(grad_sample.shape[0], -1).pow(2).sum(dim=1)
+
+        if current_sq_norms is None:
+            current_sq_norms = param_sq_norms
+        else:
+            current_sq_norms = current_sq_norms + param_sq_norms
+
+    if current_sq_norms is None:
+        return accumulated_sq_norms
+
+    if accumulated_sq_norms is None:
+        return current_sq_norms.clone()
+
+    return torch.cat([accumulated_sq_norms, current_sq_norms], dim=0)
+
+
+def _compute_post_clip_norms(
+    pre_clip_norms: torch.Tensor,
+    max_grad_norm,
+) -> torch.Tensor:
+    """
+    For flat clipping, clipped per-sample norms are min(pre_clip_norm, max_grad_norm).
+
+    Returns:
+        Tensor of shape [batch_size, 1]
+    """
+    if isinstance(max_grad_norm, (list, tuple)):
+        raise ValueError(
+            "This helper assumes flat clipping with scalar max_grad_norm. "
+            "Per-layer clipping needs a different post-clip computation."
+        )
+
+    clip_value = float(max_grad_norm)
+    return pre_clip_norms.clamp(max=clip_value)
+
+
+def _make_per_sample_norm_table(wandb_module, pre_clip_norms: torch.Tensor, post_clip_norms: torch.Tensor):
+    """
+    Create a W&B table with one row per sample in the logical batch.
+    """
+    pre_cpu = pre_clip_norms.detach().cpu()
+    post_cpu = post_clip_norms.detach().cpu()
+
+    return wandb_module.Table(
+        data=[
+            [i, pre_cpu[i, 0].item(), post_cpu[i, 0].item()]
+            for i in range(pre_cpu.shape[0])
+        ],
+        columns=["sample_idx", "pre_clip_grad_norm", "post_clip_grad_norm"],
+    )
+
+
+def _log_gradient_norms(
+    wandb_module,
+    logical_batch_pre_clip_sq_norms: torch.Tensor | None,
+    logical_step: int,
+    epoch: int,
+    config: TrainConfig,
+):
     if wandb_module is None or not config.log_batch_gradients:
         return
 
-    pre_clip = _summarize_gradients(unclipped_gradients, config.gradient_histogram_max_values)
-    post_clip = _summarize_gradients(clipped_gradients, config.gradient_histogram_max_values)
+    if logical_batch_pre_clip_sq_norms is None or logical_batch_pre_clip_sq_norms.numel() == 0:
+        return
+
+    pre_clip_norms = logical_batch_pre_clip_sq_norms.sqrt().unsqueeze(1)   # [batch_size, 1]
+    post_clip_norms = _compute_post_clip_norms(pre_clip_norms, config.max_grad_norm)
+
+    pre_np = pre_clip_norms.squeeze(1).detach().cpu().numpy()
+    post_np = post_clip_norms.squeeze(1).detach().cpu().numpy()
 
     payload = {
         "epoch": epoch,
         "gradient/logical_step": logical_step,
-        "gradient/pre_clip_norm": pre_clip["norm"],
-        "gradient/pre_clip_mean": pre_clip["mean"],
-        "gradient/pre_clip_std": pre_clip["std"],
-        "gradient/pre_clip_max_abs": pre_clip["max_abs"],
-        "gradient/post_clip_norm": post_clip["norm"],
-        "gradient/post_clip_mean": post_clip["mean"],
-        "gradient/post_clip_std": post_clip["std"],
-        "gradient/post_clip_max_abs": post_clip["max_abs"],
+        "gradient/pre_clip_mean": pre_clip_norms.mean().item(),
+        "gradient/pre_clip_std": pre_clip_norms.std(unbiased=False).item(),
+        "gradient/pre_clip_max": pre_clip_norms.max().item(),
+        "gradient/post_clip_mean": post_clip_norms.mean().item(),
+        "gradient/post_clip_std": post_clip_norms.std(unbiased=False).item(),
+        "gradient/post_clip_max": post_clip_norms.max().item(),
+        "gradient/clipping_rate": (pre_clip_norms > float(config.max_grad_norm)).float().mean().item(),
+        "gradient/pre_clip_histogram": wandb_module.Histogram(pre_np),
+        "gradient/post_clip_histogram": wandb_module.Histogram(post_np),
     }
-
-    if pre_clip["histogram_values"].numel() > 0:
-        payload["gradient/pre_clip_histogram"] = wandb_module.Histogram(pre_clip["histogram_values"].numpy())
-    if post_clip["histogram_values"].numel() > 0:
-        payload["gradient/post_clip_histogram"] = wandb_module.Histogram(post_clip["histogram_values"].numpy())
 
     wandb_module.log(payload)
 
@@ -131,7 +165,7 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
         "Warning: logging pre-clip gradients to W&B invalidates any meaningful differential privacy guarantee. "
         "This run should be treated as gradient analysis, not private training."
     )
-
+    model.train()
     model = PrivacyEngine.get_compatible_module(model)
     model.to(device)
 
@@ -165,7 +199,9 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
         model.train()
         running_loss = 0.0
         physical_steps = 0
-        logical_batch_unclipped_gradients = [None for _ in optimizer.params]
+
+        # stores squared norms for all samples belonging to the current logical batch
+        logical_batch_pre_clip_sq_norms = None
 
         with BatchMemoryManager(
             data_loader=private_train_loader,
@@ -184,10 +220,14 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
                 running_loss += loss.detach().cpu().item()
                 physical_steps += 1
 
-                logical_batch_unclipped_gradients = _accumulate_unclipped_batch_gradients(
+                # collect pre-clip per-sample squared norms for this physical batch,
+                # append them to the current logical batch
+                logical_batch_pre_clip_sq_norms = _accumulate_logical_batch_per_sample_sq_norms(
                     optimizer=optimizer,
-                    gradient_buffer=logical_batch_unclipped_gradients,
+                    accumulated_sq_norms=logical_batch_pre_clip_sq_norms,
                 )
+
+                # clip and accumulate inside Opacus, but do not update weights unless configured
                 optimizer.clip_and_accumulate()
 
                 skip_next_step = optimizer._check_skip_next_step()
@@ -195,12 +235,10 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
 
                 if not skip_next_step:
                     logical_step += 1
-                    clipped_gradients = _collect_clipped_batch_gradients(optimizer)
 
-                    _log_gradient_summaries(
+                    _log_gradient_norms(
                         wandb_module=wandb,
-                        unclipped_gradients=logical_batch_unclipped_gradients,
-                        clipped_gradients=clipped_gradients,
+                        logical_batch_pre_clip_sq_norms=logical_batch_pre_clip_sq_norms,
                         logical_step=logical_step,
                         epoch=epoch + 1,
                         config=config,
@@ -211,7 +249,7 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
                         optimizer.scale_grad()
                         optimizer.original_optimizer.step()
 
-                    logical_batch_unclipped_gradients = [None for _ in optimizer.params]
+                    logical_batch_pre_clip_sq_norms = None
 
                     if logical_step % config.log_every == 0:
                         avg_loss = running_loss / max(physical_steps, 1)

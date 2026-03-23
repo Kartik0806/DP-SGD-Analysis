@@ -110,7 +110,9 @@ def train(model, dataloaders: dict, config: TrainConfig):
             running_loss += loss.item() * config.grad_accumulation_steps
 
             if step % config.grad_accumulation_steps == 0 or step == len(dataloaders["train_loader"]):
-                optimizer.step()
+
+                # optimizer.step()
+                
                 scheduler.step()
                 optimizer.zero_grad()
                 global_step += 1

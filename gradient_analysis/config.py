@@ -17,7 +17,7 @@ class TrainConfig:
     seed: int = 42
     num_workers: int = 0
     output_dir: str = "outputs"
-    log_every: int = 20
+    log_every: int = 1
     use_wandb: bool = False
     wandb_project: str | None = None
     wandb_run_name: str | None = None
