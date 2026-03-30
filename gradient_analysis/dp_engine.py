@@ -175,17 +175,54 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
         weight_decay=config.weight_decay,
     )
 
-    privacy_engine = PrivacyEngine(
-        accountant=config.dp_accountant,
-        secure_mode=config.dp_secure_mode,
-    )
-    model, optimizer, private_train_loader = privacy_engine.make_private(
+    # privacy_engine = PrivacyEngine(
+    #     accountant=config.dp_accountant,
+    #     secure_mode=config.dp_secure_mode,
+    # )
+    # model, optimizer, train_dataloader = privacy_engine.make_private(
+    #     module=model,
+    #     optimizer=optimizer,
+    #     data_loader=dataloaders["train_loader"],
+    #     noise_multiplier=config.noise_multiplier,
+    #     max_grad_norm=config.max_grad_norm,
+    #     poisson_sampling=config.dp_poisson_sampling,
+    # )
+
+    train_dataloader = dataloaders["train_loader"]
+    EPOCHS = 3
+    LOGGING_INTERVAL = 2000 
+    EPSILON = 7.5
+    DELTA = 1 / len(train_dataloader)
+
+    MAX_GRAD_NORM = 1.0
+
+    privacy_engine = PrivacyEngine(accountant=config.dp_accountant)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, eps=1e-8)
+
+    trainable_layers = [model.roberta.encoder.layer[-1], model.classifier]
+    total_params = 0
+    trainable_params = 0
+
+    for p in model.parameters():
+            p.requires_grad = False
+            total_params += p.numel()
+
+    for layer in trainable_layers:
+        for p in layer.parameters():
+            p.requires_grad = True
+            trainable_params += p.numel()
+
+    print(f"Total parameters count: {total_params:,}") # ~108M
+    print(f"Trainable parameters count: {trainable_params:,}") # ~7M
+
+    model, optimizer, train_dataloader = privacy_engine.make_private_with_epsilon(
         module=model,
         optimizer=optimizer,
-        data_loader=dataloaders["train_loader"],
-        noise_multiplier=config.noise_multiplier,
-        max_grad_norm=config.max_grad_norm,
-        poisson_sampling=config.dp_poisson_sampling,
+        data_loader=train_dataloader,
+        target_delta=DELTA,
+        target_epsilon=EPSILON,
+        epochs=EPOCHS,
+        max_grad_norm=MAX_GRAD_NORM,
     )
 
     best_metric_name = PRIMARY_METRICS[config.task] if config.run_eval else None
@@ -204,7 +241,7 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
         logical_batch_pre_clip_sq_norms = None
 
         with BatchMemoryManager(
-            data_loader=private_train_loader,
+            data_loader=train_dataloader,
             max_physical_batch_size=config.max_physical_batch_size,
             optimizer=optimizer,
         ) as memory_safe_data_loader:
@@ -235,7 +272,7 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
 
                 if not skip_next_step:
                     logical_step += 1
-
+                    print(f"Logical step {logical_step} completed. ", end="")
                     _log_gradient_norms(
                         wandb_module=wandb,
                         logical_batch_pre_clip_sq_norms=logical_batch_pre_clip_sq_norms,
