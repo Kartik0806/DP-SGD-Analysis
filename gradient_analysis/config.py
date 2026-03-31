@@ -4,9 +4,9 @@ from dataclasses import dataclass
 @dataclass
 class TrainConfig:
     model_name: str = "FacebookAI/roberta-base"
-    task: str = "mrpc"
+    task: str = "sst2"
     use_lora: bool = False
-    batch_size: int = 32
+    batch_size: int = 2048
     eval_batch_size: int = 64
     learning_rate: float = 5e-4
     num_epochs: int = 5
