@@ -194,12 +194,17 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
     EPSILON = 7.5
     DELTA = 1 / len(train_dataloader)
 
-    MAX_GRAD_NORM = 1.0
+    MAX_GRAD_NORM = 100000.0  # effectively no clipping, to analyze raw gradient norms
 
-    privacy_engine = PrivacyEngine(accountant=config.dp_accountant)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, eps=1e-8)
+    MAX_GRAD_NORM = config.max_grad_norm
+    # privacy_engine = PrivacyEngine(accountant=config.dp_accountant)
+    lr = config.learning_rate
+    optimizer = torch.optim.AdamW(
+    model.parameters(), lr=lr, eps=1e-8, )
 
-    trainable_layers = [model.roberta.encoder.layer[-1], model.classifier]
+    # trainable_layers = [model.roberta.encoder.layer[-1], model.classifier]
+    trainable_layers = [model.classifier]
+
     total_params = 0
     trainable_params = 0
 
@@ -215,14 +220,28 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
     print(f"Total parameters count: {total_params:,}") # ~108M
     print(f"Trainable parameters count: {trainable_params:,}") # ~7M
 
-    model, optimizer, train_dataloader = privacy_engine.make_private_with_epsilon(
+    # model, optimizer, train_dataloader = privacy_engine.make_private_with_epsilon(
+    #     module=model,
+    #     optimizer=optimizer,
+    #     data_loader=train_dataloader,
+    #     target_delta=DELTA,
+    #     target_epsilon=EPSILON,
+    #     epochs=EPOCHS,
+    #     max_grad_norm=MAX_GRAD_NORM,
+    # )
+
+    privacy_engine = PrivacyEngine(
+        accountant=config.dp_accountant,
+        secure_mode=config.dp_secure_mode,
+    )
+    model, optimizer, train_dataloader = privacy_engine.make_private(
         module=model,
         optimizer=optimizer,
         data_loader=train_dataloader,
-        target_delta=DELTA,
-        target_epsilon=EPSILON,
-        epochs=EPOCHS,
+        noise_multiplier=config.noise_multiplier,
         max_grad_norm=MAX_GRAD_NORM,
+        poisson_sampling=config.dp_poisson_sampling,
+
     )
 
     best_metric_name = PRIMARY_METRICS[config.task] if config.run_eval else None
@@ -272,7 +291,6 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
 
                 if not skip_next_step:
                     logical_step += 1
-                    print(f"Logical step {logical_step} completed. ", end="")
                     _log_gradient_norms(
                         wandb_module=wandb,
                         logical_batch_pre_clip_sq_norms=logical_batch_pre_clip_sq_norms,
@@ -360,7 +378,15 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
 
     if wandb is not None:
         wandb.finish()
-
+    
+    eval_metrics = evaluate_model(
+        model=model,
+        dataloader=dataloaders["eval_loader"],
+        metric=metric,
+        device=device,
+        task=config.task,
+    )
+    # print("epsilon after training:", privacy_engine.get_epsilon(DELTA))
     return {
         "best_metric_name": best_metric_name,
         "best_metric_value": best_metric_value,
