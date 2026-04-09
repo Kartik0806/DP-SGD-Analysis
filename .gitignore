@@ -1,0 +1,6 @@
+venv
+outputs
+__pycache__
+.ipynb_checkpoints
+wandb
+*.zip

@@ -2,7 +2,7 @@ python3 -m train_dp --batch-size=2048 \
     --num-epochs=10 \
     --task="sst2" \
     --noise-multiplier=0 \
-    --learning-rate=5e-2 \
+    --learning-rate=1e-3 \
     --max-grad-norm=1000000 \
     --disable-poisson-sampling \
     --wandb-project="dp-sgd-analysis" \
@@ -10,7 +10,8 @@ python3 -m train_dp --batch-size=2048 \
     --max-physical-batch-size=32 \
     --run-eval \
     --update-weights \
-    --use-wandb
+
+
 # python3 -m train --batch-size=16 \
 #     --num-epochs=5 \
 #     --task="sst2" \

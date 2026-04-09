@@ -111,7 +111,7 @@ def train(model, dataloaders: dict, config: TrainConfig):
 
             if step % config.grad_accumulation_steps == 0 or step == len(dataloaders["train_loader"]):
 
-                # optimizer.step()
+                optimizer.step()
                 
                 scheduler.step()
                 optimizer.zero_grad()
