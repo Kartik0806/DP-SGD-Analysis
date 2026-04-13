@@ -36,15 +36,24 @@ def _tokenize_dataset(raw_dataset, tokenizer, config: TrainConfig):
     return dataset
 
 
-def create_dataloaders(tokenizer, config: TrainConfig):
+def create_dataloaders(tokenizer, config: TrainConfig, train_fraction: float = 1.0):
     raw_dataset = load_dataset("glue", config.task)
     tokenized_dataset = _tokenize_dataset(raw_dataset, tokenizer, config)
 
     validation_split = get_validation_split(config.task)
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
+    train_split = tokenized_dataset["train"]
+
+    # Subsample the training set if train_fraction < 1.0
+    if train_fraction < 1.0:
+        num_samples = max(1, int(len(train_split) * train_fraction))
+        train_split = train_split.select(range(num_samples))
+        print(f"[Data] Using {num_samples}/{len(tokenized_dataset['train'])} "
+              f"training samples ({train_fraction*100:.0f}%)")
+
     train_loader = DataLoader(
-        tokenized_dataset["train"],
+        train_split,
         batch_size=config.batch_size,
         shuffle=True,
         collate_fn=data_collator,
@@ -67,6 +76,6 @@ def create_dataloaders(tokenizer, config: TrainConfig):
         "train_loader": train_loader,
         "eval_loader": eval_loader,
         "num_labels": num_labels,
-        "train_size": len(tokenized_dataset["train"]),
+        "train_size": len(train_split),
         "eval_size": len(tokenized_dataset[validation_split]),
     }

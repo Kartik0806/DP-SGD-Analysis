@@ -202,8 +202,8 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
     optimizer = torch.optim.AdamW(
     model.parameters(), lr=lr, eps=1e-8, )
 
-    # trainable_layers = [model.roberta.encoder.layer[-1], model.classifier]
-    trainable_layers = [model.classifier]
+    trainable_layers = [model.roberta.encoder.layer[-1], model.classifier]
+    # trainable_layers = [model.classifier]
 
     total_params = 0
     trainable_params = 0

@@ -1,15 +1,17 @@
-python3 -m train_dp --batch-size=2048 \
+python3 -m train_dp --batch-size=32 \
     --num-epochs=10 \
     --task="sst2" \
     --noise-multiplier=0 \
-    --learning-rate=1e-3 \
-    --max-grad-norm=1000000 \
+    --learning-rate=5e-4 \
+    --max-grad-norm=1 \
     --disable-poisson-sampling \
+    --use-wandb \
     --wandb-project="dp-sgd-analysis" \
-    --wandb-run-name="yes-update-no-noise-high-lr" \
+    --wandb-run-name="data-sweep-clip-1" \
     --max-physical-batch-size=32 \
     --run-eval \
     --update-weights \
+    
 
 
 # python3 -m train --batch-size=16 \
