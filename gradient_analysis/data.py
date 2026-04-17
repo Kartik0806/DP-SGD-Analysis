@@ -44,6 +44,9 @@ def create_dataloaders(tokenizer, config: TrainConfig, train_fraction: float = 1
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
     train_split = tokenized_dataset["train"]
+    ds = train_split.train_test_split(test_size=0.1, shuffle=True, seed=42)
+    train_split = ds["train"]
+    test_split = ds["test"]
 
     # Subsample the training set if train_fraction < 1.0
     if train_fraction < 1.0:
@@ -66,6 +69,13 @@ def create_dataloaders(tokenizer, config: TrainConfig, train_fraction: float = 1
         collate_fn=data_collator,
         num_workers=config.num_workers,
     )
+    test_loader = DataLoader(
+        test_split,
+        batch_size=config.eval_batch_size,
+        shuffle=False,
+        collate_fn=data_collator,
+        num_workers=config.num_workers,
+    )
 
     if is_regression_task(config.task):
         num_labels = 1
@@ -75,7 +85,9 @@ def create_dataloaders(tokenizer, config: TrainConfig, train_fraction: float = 1
     return {
         "train_loader": train_loader,
         "eval_loader": eval_loader,
+        "test_loader": test_loader,
         "num_labels": num_labels,
         "train_size": len(train_split),
         "eval_size": len(tokenized_dataset[validation_split]),
+        "test_size": len(test_split),
     }

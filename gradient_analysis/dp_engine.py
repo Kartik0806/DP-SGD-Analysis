@@ -381,7 +381,7 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
     
     eval_metrics = evaluate_model(
         model=model,
-        dataloader=dataloaders["eval_loader"],
+        dataloader=dataloaders["train_loader"],
         metric=metric,
         device=device,
         task=config.task,
