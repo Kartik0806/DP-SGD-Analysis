@@ -48,20 +48,15 @@ def _compute_per_sample_norms_from_grad_samples(optimizer) -> torch.Tensor | Non
 def _accumulate_logical_batch_per_sample_sq_norms(
     optimizer,
     accumulated_sq_norms: torch.Tensor | None,
+    exclude_params = None
 ) -> torch.Tensor | None:
-    """
-    Accumulate per-sample squared norms across physical batches into one logical batch vector.
 
-    With BatchMemoryManager, each loop iteration may be only a physical batch.
-    We concatenate per-sample squared norms so that one logical step logs all samples
-    belonging to that logical batch.
-
-    Returns:
-        Tensor of shape [num_samples_so_far] or None
-    """
     current_sq_norms = None
 
     for parameter in optimizer.params:
+        if parameter in exclude_params:
+            # print("check")  # ADD THIS CHECK
+            continue
         grad_sample = optimizer._get_flat_grad_sample(parameter)
         if grad_sample is None:
             continue
@@ -154,6 +149,70 @@ def _log_gradient_norms(
 
     wandb_module.log(payload)
 
+def _evaluate_and_log_per_sample_loss(
+    model,
+    dataloader,
+    device,
+    wandb_module,
+    epoch: int,
+    config: TrainConfig,
+):
+    """
+    Evaluate model and log per-sample losses to wandb.
+    """
+    if wandb_module is None or not config.log_batch_gradients:
+        return None
+    
+    model.eval()
+    all_losses = []
+    
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc=f"Eval per-sample loss"):
+            batch = move_batch_to_device(batch, device)
+            outputs = model(**batch)
+            
+            # Get per-sample losses (assuming reduction='none' or we can compute it)
+            # If the model doesn't support it, we need to recompute
+            logits = outputs.logits
+            labels = batch["labels"]
+            
+            # Compute per-sample cross-entropy loss
+            print(torch.max(logits))
+            print(torch.min(logits))
+            logits = torch.clamp(logits, -1,1)
+            loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+            per_sample_losses = loss_fct(
+                logits.view(-1, logits.size(-1)), 
+                labels.view(-1)
+            )
+            
+            all_losses.append(per_sample_losses.detach().cpu())
+    
+    # Concatenate all losses
+    all_losses = torch.cat(all_losses, dim=0)
+    
+    # Log statistics
+    payload = {
+        "epoch": epoch,
+        "eval/per_sample_loss_mean": all_losses.mean().item(),
+        "eval/per_sample_loss_std": all_losses.std(unbiased=False).item(),
+        "eval/per_sample_loss_min": all_losses.min().item(),
+        "eval/per_sample_loss_max": all_losses.max().item(),
+        "eval/per_sample_loss_median": all_losses.median().item(),
+        "eval/per_sample_loss_histogram": wandb_module.Histogram(all_losses.numpy()),
+    }
+    
+    wandb_module.log(payload)
+    
+    # Create a table with per-sample losses
+    loss_table = wandb_module.Table(
+        data=[[i, all_losses[i].item()] for i in range(len(all_losses))],
+        columns=["sample_idx", "loss"]
+    )
+    wandb_module.log({f"eval/per_sample_losses_epoch_{epoch}": loss_table})
+    
+    model.train()
+    return all_losses
 
 def train_private(model, dataloaders: dict, config: TrainConfig):
     set_seed(config.seed)
@@ -202,8 +261,10 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
     optimizer = torch.optim.AdamW(
     model.parameters(), lr=lr, eps=1e-8, )
 
-    trainable_layers = [model.roberta.encoder.layer[-1], model.classifier]
+    trainable_layers = [model.roberta.encoder.layer[-1]]
     # trainable_layers = [model.classifier]
+    exclude_params = set(model.classifier.parameters())
+    exclude_params = set()
 
     total_params = 0
     trainable_params = 0
@@ -281,6 +342,7 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
                 logical_batch_pre_clip_sq_norms = _accumulate_logical_batch_per_sample_sq_norms(
                     optimizer=optimizer,
                     accumulated_sq_norms=logical_batch_pre_clip_sq_norms,
+                    exclude_params = exclude_params
                 )
 
                 # clip and accumulate inside Opacus, but do not update weights unless configured
@@ -329,6 +391,15 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
                 task=config.task,
             )
             current_metric = eval_metrics[best_metric_name]
+
+            _evaluate_and_log_per_sample_loss(
+                model=model,
+                dataloader=dataloaders["eval_loader"],
+                device=device,
+                wandb_module=wandb,
+                epoch=epoch + 1,
+                config=config,
+            )
 
             print(
                 f"Epoch {epoch + 1}: "
@@ -381,7 +452,7 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
     
     eval_metrics = evaluate_model(
         model=model,
-        dataloader=dataloaders["train_loader"],
+        dataloader=dataloaders["test_loader"],
         metric=metric,
         device=device,
         task=config.task,

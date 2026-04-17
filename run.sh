@@ -1,17 +1,30 @@
 python3 -m train_dp --batch-size=32 \
-    --num-epochs=10 \
+    --num-epochs=5 \
     --task="sst2" \
     --noise-multiplier=0 \
     --learning-rate=5e-4 \
-    --max-grad-norm=1 \
+    --max-grad-norm=10000000 \
     --disable-poisson-sampling \
     --use-wandb \
-    --wandb-project="dp-sgd-analysis" \
-    --wandb-run-name="data-sweep-clip-1" \
+    --wandb-project="dp-sgd-analysis-11" \
+    --wandb-run-name="only encoder" \
     --max-physical-batch-size=32 \
     --run-eval \
     --update-weights \
-    
+
+# python3 -m train_dp --batch-size=32 \
+#     --num-epochs=1 \
+#     --task="sst2" \
+#     --noise-multiplier=0 \
+#     --learning-rate=5e-4 \
+#     --max-grad-norm=0.1 \
+#     --disable-poisson-sampling \
+#     --use-wandb \
+#     --wandb-project="dp-sgd-analysis" \
+#     --wandb-run-name="clamp-1" \
+#     --max-physical-batch-size=32 \
+#     --run-eval \
+#     --update-weights \
 
 
 # python3 -m train --batch-size=16 \

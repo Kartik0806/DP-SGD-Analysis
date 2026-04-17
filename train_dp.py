@@ -63,7 +63,8 @@ def main():
         fractions = [round(f / 10, 1) for f in range(10, 0, -1)]  # [1.0, 0.9, ..., 0.1]
     else:
         fractions = args.train_fractions
-
+    
+    fractions = [1.0]
     base_wandb_run_name = args.wandb_run_name or "dp_run"
     all_results = {}
 
