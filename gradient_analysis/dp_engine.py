@@ -177,9 +177,9 @@ def _evaluate_and_log_per_sample_loss(
             labels = batch["labels"]
             
             # Compute per-sample cross-entropy loss
-            print(torch.max(logits))
-            print(torch.min(logits))
-            logits = torch.clamp(logits, -1,1)
+            # print(torch.max(logits))
+            # print(torch.min(logits))
+            # logits = torch.clamp(logits, -1,1)
             loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
             per_sample_losses = loss_fct(
                 logits.view(-1, logits.size(-1)), 
@@ -450,13 +450,15 @@ def train_private(model, dataloaders: dict, config: TrainConfig):
     if wandb is not None:
         wandb.finish()
     
-    eval_metrics = evaluate_model(
+    test_metrics = evaluate_model(
         model=model,
         dataloader=dataloaders["test_loader"],
         metric=metric,
         device=device,
         task=config.task,
     )
+
+    print(test_metrics)
     # print("epsilon after training:", privacy_engine.get_epsilon(DELTA))
     return {
         "best_metric_name": best_metric_name,

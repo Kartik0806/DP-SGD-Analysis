@@ -64,7 +64,7 @@ def main():
     else:
         fractions = args.train_fractions
     
-    fractions = [1.0]
+    fractions = [0.4]
     base_wandb_run_name = args.wandb_run_name or "dp_run"
     all_results = {}
 
